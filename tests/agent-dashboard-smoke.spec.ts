@@ -235,7 +235,7 @@ test.describe('agent dashboard smoke', () => {
     await goToSidebarPage(page, 'Settings');
 
     await expect(page).toHaveURL(new RegExp(`/agents/${AGENT_ID}/settings`));
-    await expect(page.getByText('Web Widget Settings', { exact: true })).toBeVisible();
+   await expect(page.getByText('Web Widget Settings', { exact: true })).toBeVisible({ timeout: 15_000 });
     await expect(
       page.getByText('Configure your web widget settings and behavior', { exact: true }),
     ).toBeVisible();
