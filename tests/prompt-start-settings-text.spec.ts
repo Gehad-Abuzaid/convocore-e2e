@@ -61,8 +61,84 @@ async function prepareAgentPage(page: Page) {
   await ensureTextTabSelected(page);
 }
 
+function openingPopup(page: Page) {
+  return page.getByRole('dialog').filter({
+    has: page.getByText('AI opening · Text'),
+  });
+}
+
+function testChat(page: Page) {
+  const panel = page
+    .locator('div')
+    .filter({ has: page.getByText('Your virtual assistant.', { exact: true }) })
+    .filter({ has: page.getByText('Message', { exact: true }) })
+    .filter({ hasNot: page.getByText('Start Settings', { exact: true }) });
+  return panel.filter({ hasNot: panel });
+}
+
+async function readOpeningSummary(page: Page) {
+  const edit = startSettings(page).getByRole('button', { name: 'Edit' });
+  await expect(edit).toBeVisible();
+  return edit.evaluate((button) => {
+    const label = [...button.querySelectorAll('*')].find((el) => {
+      const own = [...el.childNodes]
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.textContent ?? '')
+        .join('')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return own === 'AI opening message';
+    });
+    const lines = (label?.parentElement?.parentElement?.innerText ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && line !== 'AI opening message' && line !== 'Edit');
+    return lines[0] ?? '';
+  });
+}
+
+async function saveAndPublish(page: Page) {
+  await page.getByRole('button', { name: 'Save & Publish' }).click();
+  await expect(page.getByText('Published', { exact: true })).toBeVisible();
+
+  const deployHeading = page.getByRole('heading', {
+    name: 'Published — pick a channel to deploy',
+    exact: true,
+  });
+  const shown = await deployHeading
+    .waitFor({ state: 'visible', timeout: 5_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!shown) return;
+
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(deployHeading).toBeHidden();
+}
+
+async function restoreOpeningMode(page: Page, original: string | undefined) {
+  if (page.isClosed() || !original) return;
+
+  try {
+    const edit = startSettings(page).getByRole('button', { name: 'Edit' });
+    if (!(await edit.isVisible().catch(() => false))) return;
+
+    const current = await readOpeningSummary(page);
+    if (current === original) return;
+
+    const popup = openingPopup(page);
+    await edit.click();
+    await popup.getByText('AI from prompt', { exact: true }).click();
+    await popup.getByRole('button', { name: 'Next' }).click();
+    await popup.getByRole('button', { name: 'Done' }).click();
+    await saveAndPublish(page);
+  } catch (error) {
+    if (page.isClosed()) return;
+    throw error;
+  }
+}
+
 test.describe('Start Settings - Text', () => {
-  test.describe.configure({ mode: 'serial' });
+  test.describe.configure({ mode: 'serial', timeout: 90_000 });
 
   test.beforeEach(async ({ page }) => {
     await page.goto(AGENT_URL, { waitUntil: 'domcontentloaded' });
@@ -93,8 +169,7 @@ test.describe('Start Settings - Text', () => {
       const other = original === 'User starts' ? 'AI starts' : 'User starts';
 
       await startSettings(page).getByRole('radio', { name: other }).check();
-      await page.getByRole('button', { name: 'Save & Publish' }).click();
-      await expect(page.getByText('Published', { exact: true })).toBeVisible();
+      await saveAndPublish(page);
 
       await page.reload();
       await prepareAgentPage(page);
@@ -115,8 +190,7 @@ test.describe('Start Settings - Text', () => {
       if (current === original) return;
 
       await startSettings(page).getByRole('radio', { name: original }).check();
-      await page.getByRole('button', { name: 'Save & Publish' }).click();
-      await expect(page.getByText('Published', { exact: true })).toBeVisible();
+      await saveAndPublish(page);
     }
   });
 
@@ -162,5 +236,102 @@ test.describe('Start Settings - Text', () => {
 
     await expect(page.getByText('AI opening · Text · 1/2')).toBeHidden();
     await expect(page.getByText('AI-generated from prompt')).toBeVisible();
+  });
+
+  test('TC08 - Fixed message: Next opens the message input', async ({ page }) => {
+    await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+    await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+    const popup = openingPopup(page);
+    await popup.getByText('Fixed message', { exact: true }).click();
+    await popup.getByRole('button', { name: 'Next' }).click();
+
+    await expect(popup.getByText('AI opening · Text · 2/2')).toBeVisible();
+    await expect(popup.getByText('Write the fixed opening message.')).toBeVisible();
+    await expect(popup.getByRole('textbox')).toBeVisible();
+    await page.keyboard.press('Escape');
+  });
+
+  test('TC09 - Empty message: Done is disabled', async ({ page }) => {
+    await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+    await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+    const popup = openingPopup(page);
+    await popup.getByText('Fixed message', { exact: true }).click();
+    await popup.getByRole('button', { name: 'Next' }).click();
+
+    await expect(popup.getByRole('button', { name: 'Done' })).toBeDisabled();
+    await page.keyboard.press('Escape');
+  });
+
+  test('TC10 - Spaces only: Done is disabled', async ({ page }) => {
+    await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+    await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+    const popup = openingPopup(page);
+    await popup.getByText('Fixed message', { exact: true }).click();
+    await popup.getByRole('button', { name: 'Next' }).click();
+
+    await popup.getByRole('textbox').fill('     ');
+    await expect(popup.getByRole('button', { name: 'Done' })).toBeDisabled();
+    await page.keyboard.press('Escape');
+  });
+
+  test('TC11 - Fixed message is saved and shown in the summary', async ({ page }) => {
+    test.setTimeout(90_000);
+    const message = `QA fixed ${Date.now()}`;
+    let original: string | undefined;
+
+    try {
+      await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+      original = await readOpeningSummary(page);
+
+      await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+      const popup = openingPopup(page);
+      await popup.getByText('Fixed message', { exact: true }).click();
+      await popup.getByRole('button', { name: 'Next' }).click();
+      await popup.getByRole('textbox').fill(message);
+      await expect(popup.getByRole('button', { name: 'Done' })).toBeEnabled();
+      await popup.getByRole('button', { name: 'Done' }).click();
+
+      await expect(startSettings(page).getByText(message, { exact: true })).toBeVisible();
+
+      await saveAndPublish(page);
+
+      await page.reload();
+      await prepareAgentPage(page);
+      await expect(startSettings(page).getByText(message, { exact: true })).toBeVisible();
+    } finally {
+      await restoreOpeningMode(page, original);
+    }
+  });
+
+  test('TC12 - Test chat starts with the exact fixed message', async ({ page }) => {
+    test.setTimeout(90_000);
+    const message = `QA fixed ${Date.now()}`;
+    let original: string | undefined;
+
+    try {
+      await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+      original = await readOpeningSummary(page);
+
+      await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+      const popup = openingPopup(page);
+      await popup.getByText('Fixed message', { exact: true }).click();
+      await popup.getByRole('button', { name: 'Next' }).click();
+      await popup.getByRole('textbox').fill(message);
+      await popup.getByRole('button', { name: 'Done' }).click();
+      await saveAndPublish(page);
+
+      await page.getByRole('button', { name: 'Show Test' }).click();
+      // The reload icon has no accessible name: no aria-label, title, or text.
+      await testChat(page).locator('button').filter({
+        has: page.locator('svg.vg-footer-reload--icon'),
+      }).click();
+      await page.getByRole('button', { name: 'Refresh the Conversation' }).click();
+
+      await expect(testChat(page).getByText(message, { exact: true })).toBeVisible({
+        timeout: 30_000,
+      });
+    } finally {
+      await restoreOpeningMode(page, original);
+    }
   });
 });
