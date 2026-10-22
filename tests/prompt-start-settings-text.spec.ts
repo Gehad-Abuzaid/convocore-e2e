@@ -2,6 +2,8 @@ import { test, expect, type Page } from '@playwright/test';
 
 const FUNCTIONAL_AGENT_ID = 'yjcqF4irAPsWuhhOlWsW';
 const AGENT_URL = `/app/na/agents/${FUNCTIONAL_AGENT_ID}/nodes`;
+const BASELINE_INSTRUCTIONS =
+  'Greet the user warmly and tell him that you are ready to help him.';
 
 async function dismissBlockingUi(page: Page) {
   const skip = page.getByRole('button', { name: 'Skip & Never Show Again' });
@@ -135,6 +137,41 @@ async function restoreOpeningMode(page: Page, original: string | undefined) {
     if (page.isClosed()) return;
     throw error;
   }
+}
+
+function isAiFromPrompt(summary: string) {
+  return /ai-generated from prompt|ai from prompt/i.test(summary);
+}
+
+function instructionsCard(page: Page) {
+  return page
+    .getByRole('button', { name: 'Enter fullscreen' })
+    .locator('xpath=ancestor::div[.//button[normalize-space()="AI Assist" or @aria-label="AI Assist"]][1]');
+}
+
+async function setInstructions(page: Page, text: string) {
+  const card = instructionsCard(page);
+  await card.getByText('Instructions', { exact: true }).click();
+  const editor = card.locator('[contenteditable="true"]');
+  await editor.waitFor({ state: 'visible' });
+  await editor.click();
+  await page.keyboard.press('Control+A');
+  await page.keyboard.insertText(text);
+  expect((await editor.innerText()).trim()).toBe(text);
+}
+
+async function testChatHasHistory(page: Page) {
+  if (await testChat(page).getByText('Thought briefly', { exact: true }).isVisible().catch(() => false)) {
+    return true;
+  }
+  const extra = (await testChat(page).innerText())
+    .replace(/QA Functional Agent/g, '')
+    .replace(/Your virtual assistant\./g, '')
+    .replace(/Hide Test/g, '')
+    .replace(/Message/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+  return extra.length > 0;
 }
 
 test.describe('Start Settings - Text', () => {
@@ -327,11 +364,116 @@ test.describe('Start Settings - Text', () => {
       }).click();
       await page.getByRole('button', { name: 'Refresh the Conversation' }).click();
 
-      await expect(testChat(page).getByText(message, { exact: true })).toBeVisible({
-        timeout: 30_000,
-      });
+    await expect(testChat(page).getByText(message, { exact: true })).toBeVisible({
+      timeout: 30_000,
+    });
     } finally {
       await restoreOpeningMode(page, original);
+    }
+  });
+
+  test('TC13 - AI from prompt: Next shows the cache note', async ({ page }) => {
+    await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+    await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+    const popup = openingPopup(page);
+    await popup.getByText('AI from prompt', { exact: true }).click();
+    await popup.getByRole('button', { name: 'Next' }).click();
+
+    await expect(popup.getByText('AI opening · Text · 2/2')).toBeVisible();
+    await expect(popup.getByText('Always cached', { exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(popup.getByText('AI opening · Text · 2/2')).toBeHidden();
+  });
+
+  test('TC14 - AI from prompt is saved and shown in the summary', async ({ page }) => {
+    test.setTimeout(120_000);
+    let originalMode: string | undefined;
+
+    try {
+      await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+      originalMode = await readOpeningSummary(page);
+
+      if (isAiFromPrompt(originalMode)) {
+        const message = `QA fixed ${Date.now()}`;
+        await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+        const popup = openingPopup(page);
+        await popup.getByText('Fixed message', { exact: true }).click();
+        await popup.getByRole('button', { name: 'Next' }).click();
+        await popup.getByRole('textbox').fill(message);
+        await popup.getByRole('button', { name: 'Done' }).click();
+        await saveAndPublish(page);
+      }
+
+      const popup = openingPopup(page);
+      await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+      await popup.getByText('AI from prompt', { exact: true }).click();
+      await popup.getByRole('button', { name: 'Next' }).click();
+      await popup.getByRole('button', { name: 'Done' }).click();
+
+      await expect(startSettings(page).getByText('AI-generated from prompt')).toBeVisible();
+      await saveAndPublish(page);
+
+      await page.reload();
+      await prepareAgentPage(page);
+      await expect(startSettings(page).getByText('AI-generated from prompt')).toBeVisible();
+    } finally {
+      await restoreOpeningMode(page, originalMode);
+    }
+  });
+
+  test('TC15 - Instructions opening line is used in the test chat', async ({ page }) => {
+    test.setTimeout(120_000);
+    const token = `QA-${Date.now()}`;
+    let originalMode: string | undefined;
+
+    try {
+      await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+      originalMode = await readOpeningSummary(page);
+
+      if (!isAiFromPrompt(originalMode)) {
+        const popup = openingPopup(page);
+        await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+        await popup.getByText('AI from prompt', { exact: true }).click();
+        await popup.getByRole('button', { name: 'Next' }).click();
+        await popup.getByRole('button', { name: 'Done' }).click();
+      }
+
+      await setInstructions(page, `Always start by saying "${token}".`);
+      await saveAndPublish(page);
+
+      await page.getByRole('button', { name: 'Show Test' }).click();
+      if (await testChatHasHistory(page)) {
+        await testChat(page).locator('button').filter({
+          has: page.locator('svg.vg-footer-reload--icon'),
+        }).click();
+        const confirm = page.getByRole('button', { name: 'Refresh the Conversation' });
+        const appeared = await confirm
+          .waitFor({ state: 'visible', timeout: 3_000 })
+          .then(() => true)
+          .catch(() => false);
+        if (appeared) await confirm.click();
+      }
+
+      await expect(
+        testChat(page).getByText(new RegExp(`^\\W*${token}\\W*$`))
+      ).toBeVisible({ timeout: 60_000 });
+    } finally {
+      let instructionsError: unknown;
+      if (!page.isClosed()) {
+        try {
+          const hide = page.getByRole('button', { name: 'Hide Test' });
+          if (await hide.isVisible().catch(() => false)) await hide.click();
+          await setInstructions(page, BASELINE_INSTRUCTIONS);
+          await saveAndPublish(page);
+          await expect(
+            instructionsCard(page).getByText(BASELINE_INSTRUCTIONS, { exact: true }),
+          ).toBeVisible();
+        } catch (error) {
+          instructionsError = error;
+        }
+      }
+      await restoreOpeningMode(page, originalMode);
+      if (instructionsError && !page.isClosed()) throw instructionsError;
     }
   });
 });
