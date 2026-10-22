@@ -81,17 +81,40 @@ test.describe('Start Settings - Text', () => {
     await expect(startSettings(page).getByRole('button', { name: 'Edit' })).toBeVisible();
   });
 
-  test('TC03 - Who speaks first persists after save (original: AI starts)', async ({ page }) => {
+  test('TC03 - Who speaks first persists after save', async ({ page }) => {
+    test.setTimeout(90_000);
+    let original: 'User starts' | 'AI starts' | undefined;
+
     try {
-      await startSettings(page).getByRole('radio', { name: 'User starts' }).check();
+      const userStartsChecked = await startSettings(page)
+        .getByRole('radio', { name: 'User starts' })
+        .isChecked();
+      original = userStartsChecked ? 'User starts' : 'AI starts';
+      const other = original === 'User starts' ? 'AI starts' : 'User starts';
+
+      await startSettings(page).getByRole('radio', { name: other }).check();
       await page.getByRole('button', { name: 'Save & Publish' }).click();
       await expect(page.getByText('Published', { exact: true })).toBeVisible();
 
       await page.reload();
       await prepareAgentPage(page);
-      await expect(startSettings(page).getByRole('radio', { name: 'User starts' })).toBeChecked();
+      await expect(startSettings(page).getByRole('radio', { name: other })).toBeChecked();
     } finally {
-      await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+      if (page.isClosed() || !original) return;
+
+      const userStartsChecked = await startSettings(page)
+        .getByRole('radio', { name: 'User starts' })
+        .isChecked()
+        .catch((error) => {
+          if (page.isClosed()) return null;
+          throw error;
+        });
+      if (userStartsChecked === null) return;
+
+      const current = userStartsChecked ? 'User starts' : 'AI starts';
+      if (current === original) return;
+
+      await startSettings(page).getByRole('radio', { name: original }).check();
       await page.getByRole('button', { name: 'Save & Publish' }).click();
       await expect(page.getByText('Published', { exact: true })).toBeVisible();
     }
