@@ -69,13 +69,21 @@ function openingPopup(page: Page) {
   });
 }
 
+// The matching divs are nested, and .last() is the innermost one.
 function testChat(page: Page) {
-  const panel = page
+  return page
     .locator('div')
     .filter({ has: page.getByText('Your virtual assistant.', { exact: true }) })
     .filter({ has: page.getByText('Message', { exact: true }) })
-    .filter({ hasNot: page.getByText('Start Settings', { exact: true }) });
-  return panel.filter({ hasNot: panel });
+    .last();
+}
+
+function designPreview(page: Page) {
+  return page
+    .locator('div')
+    .filter({ has: page.getByText('Design studio · tweak & accept', { exact: true }) })
+    .filter({ has: page.getByText('Live chat preview', { exact: true }) })
+    .last();
 }
 
 async function readOpeningSummary(page: Page) {
@@ -101,7 +109,8 @@ async function readOpeningSummary(page: Page) {
 
 async function saveAndPublish(page: Page) {
   await page.getByRole('button', { name: 'Save & Publish' }).click();
-  await expect(page.getByText('Published', { exact: true })).toBeVisible();
+  // Publishing can be slow: the button shows "Loading Save & Publish" until the server responds.
+  await expect(page.getByText('Published', { exact: true })).toBeVisible({ timeout: 30_000 });
 
   const deployHeading = page.getByRole('heading', {
     name: 'Published — pick a channel to deploy',
@@ -117,22 +126,34 @@ async function saveAndPublish(page: Page) {
   await expect(deployHeading).toBeHidden();
 }
 
-async function restoreOpeningMode(page: Page, original: string | undefined) {
-  if (page.isClosed() || !original) return;
+// Restores the baseline: AI starts, AI opening "AI from prompt".
+async function restoreOpeningMode(page: Page) {
+  if (page.isClosed()) return;
 
   try {
-    const edit = startSettings(page).getByRole('button', { name: 'Edit' });
-    if (!(await edit.isVisible().catch(() => false))) return;
+    const hide = page.getByRole('button', { name: 'Hide Test' });
+    if (await hide.isVisible().catch(() => false)) {
+      await hide.click();
+      await expect(hide).toBeHidden();
+    }
 
-    const current = await readOpeningSummary(page);
-    if (current === original) return;
+    let changed = false;
+    const aiStarts = startSettings(page).getByRole('radio', { name: 'AI starts' });
+    if (!(await aiStarts.isChecked())) {
+      await aiStarts.check();
+      changed = true;
+    }
 
-    const popup = openingPopup(page);
-    await edit.click();
-    await popup.getByText('AI from prompt', { exact: true }).click();
-    await popup.getByRole('button', { name: 'Next' }).click();
-    await popup.getByRole('button', { name: 'Done' }).click();
-    await saveAndPublish(page);
+    if (!isAiFromPrompt(await readOpeningSummary(page))) {
+      const popup = openingPopup(page);
+      await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+      await popup.getByText('AI from prompt', { exact: true }).click();
+      await popup.getByRole('button', { name: 'Next' }).click();
+      await popup.getByRole('button', { name: 'Done' }).click();
+      changed = true;
+    }
+
+    if (changed) await saveAndPublish(page);
   } catch (error) {
     if (page.isClosed()) return;
     throw error;
@@ -145,8 +166,10 @@ function isAiFromPrompt(summary: string) {
 
 function instructionsCard(page: Page) {
   return page
-    .getByRole('button', { name: 'Enter fullscreen' })
-    .locator('xpath=ancestor::div[.//button[normalize-space()="AI Assist" or @aria-label="AI Assist"]][1]');
+    .locator('div')
+    .filter({ has: page.getByRole('button', { name: 'Enter fullscreen' }) })
+    .filter({ has: page.getByRole('button', { name: 'AI Assist', exact: true }) })
+    .last();
 }
 
 async function setInstructions(page: Page, text: string) {
@@ -195,40 +218,36 @@ test.describe('Start Settings - Text', () => {
   });
 
   test('TC03 - Who speaks first persists after save', async ({ page }) => {
-    test.setTimeout(90_000);
-    let original: 'User starts' | 'AI starts' | undefined;
+    // beforeEach + save + reload + restore: page loads alone can take ~75s.
+    test.setTimeout(120_000);
 
     try {
-      const userStartsChecked = await startSettings(page)
-        .getByRole('radio', { name: 'User starts' })
-        .isChecked();
-      original = userStartsChecked ? 'User starts' : 'AI starts';
-      const other = original === 'User starts' ? 'AI starts' : 'User starts';
+      // Start from the saved baseline (AI starts) so the switch is a real change.
+      await restoreOpeningMode(page);
 
-      await startSettings(page).getByRole('radio', { name: other }).check();
+      await startSettings(page).getByRole('radio', { name: 'User starts' }).check();
       await saveAndPublish(page);
 
       await page.reload();
       await prepareAgentPage(page);
-      await expect(startSettings(page).getByRole('radio', { name: other })).toBeChecked();
+      await expect(startSettings(page).getByRole('radio', { name: 'User starts' })).toBeChecked();
     } finally {
-      if (page.isClosed() || !original) return;
-
-      const userStartsChecked = await startSettings(page)
-        .getByRole('radio', { name: 'User starts' })
-        .isChecked()
-        .catch((error) => {
-          if (page.isClosed()) return null;
-          throw error;
-        });
-      if (userStartsChecked === null) return;
-
-      const current = userStartsChecked ? 'User starts' : 'AI starts';
-      if (current === original) return;
-
-      await startSettings(page).getByRole('radio', { name: original }).check();
-      await saveAndPublish(page);
+      await restoreOpeningMode(page);
     }
+  });
+
+  test('TC05 - Edit opens the options popup', async ({ page }) => {
+    await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+    await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+    const popup = openingPopup(page);
+
+    await expect(popup.getByText('AI opening · Text · 1/2')).toBeVisible();
+    await expect(popup.getByText('Fixed message', { exact: true })).toBeVisible();
+    await expect(popup.getByText('Design with AI', { exact: true })).toBeVisible();
+    await expect(popup.getByText('AI from prompt', { exact: true })).toBeVisible();
+    // The selected option has no accessible state (see Bugs.md #6), so it is not asserted.
+
+    await page.keyboard.press('Escape');
   });
 
   test('TC06 - Next then Back keeps the selected option', async ({ page }) => {
@@ -312,13 +331,13 @@ test.describe('Start Settings - Text', () => {
   });
 
   test('TC11 - Fixed message is saved and shown in the summary', async ({ page }) => {
-    test.setTimeout(90_000);
+    // beforeEach + save + reload + restore: page loads alone can take ~75s.
+    test.setTimeout(120_000);
     const message = `QA fixed ${Date.now()}`;
-    let original: string | undefined;
 
     try {
-      await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
-      original = await readOpeningSummary(page);
+      // Start from the saved baseline (AI starts, AI from prompt).
+      await restoreOpeningMode(page);
 
       await startSettings(page).getByRole('button', { name: 'Edit' }).click();
       const popup = openingPopup(page);
@@ -336,18 +355,18 @@ test.describe('Start Settings - Text', () => {
       await prepareAgentPage(page);
       await expect(startSettings(page).getByText(message, { exact: true })).toBeVisible();
     } finally {
-      await restoreOpeningMode(page, original);
+      await restoreOpeningMode(page);
     }
   });
 
   test('TC12 - Test chat starts with the exact fixed message', async ({ page }) => {
-    test.setTimeout(90_000);
+    // beforeEach + save + test chat reply (up to 30s) + restore.
+    test.setTimeout(120_000);
     const message = `QA fixed ${Date.now()}`;
-    let original: string | undefined;
 
     try {
-      await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
-      original = await readOpeningSummary(page);
+      // Start from the saved baseline (AI starts, AI from prompt).
+      await restoreOpeningMode(page);
 
       await startSettings(page).getByRole('button', { name: 'Edit' }).click();
       const popup = openingPopup(page);
@@ -358,7 +377,7 @@ test.describe('Start Settings - Text', () => {
       await saveAndPublish(page);
 
       await page.getByRole('button', { name: 'Show Test' }).click();
-      // The reload icon has no accessible name: no aria-label, title, or text.
+      // No accessible name on this button (see Bugs.md #7). Replace with getByRole when fixed.
       await testChat(page).locator('button').filter({
         has: page.locator('svg.vg-footer-reload--icon'),
       }).click();
@@ -368,7 +387,7 @@ test.describe('Start Settings - Text', () => {
       timeout: 30_000,
     });
     } finally {
-      await restoreOpeningMode(page, original);
+      await restoreOpeningMode(page);
     }
   });
 
@@ -387,13 +406,11 @@ test.describe('Start Settings - Text', () => {
 
   test('TC14 - AI from prompt is saved and shown in the summary', async ({ page }) => {
     test.setTimeout(120_000);
-    let originalMode: string | undefined;
 
     try {
       await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
-      originalMode = await readOpeningSummary(page);
 
-      if (isAiFromPrompt(originalMode)) {
+      if (isAiFromPrompt(await readOpeningSummary(page))) {
         const message = `QA fixed ${Date.now()}`;
         await startSettings(page).getByRole('button', { name: 'Edit' }).click();
         const popup = openingPopup(page);
@@ -417,20 +434,18 @@ test.describe('Start Settings - Text', () => {
       await prepareAgentPage(page);
       await expect(startSettings(page).getByText('AI-generated from prompt')).toBeVisible();
     } finally {
-      await restoreOpeningMode(page, originalMode);
+      await restoreOpeningMode(page);
     }
   });
 
   test('TC15 - Instructions opening line is used in the test chat', async ({ page }) => {
     test.setTimeout(120_000);
     const token = `QA-${Date.now()}`;
-    let originalMode: string | undefined;
 
     try {
       await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
-      originalMode = await readOpeningSummary(page);
 
-      if (!isAiFromPrompt(originalMode)) {
+      if (!isAiFromPrompt(await readOpeningSummary(page))) {
         const popup = openingPopup(page);
         await startSettings(page).getByRole('button', { name: 'Edit' }).click();
         await popup.getByText('AI from prompt', { exact: true }).click();
@@ -443,6 +458,7 @@ test.describe('Start Settings - Text', () => {
 
       await page.getByRole('button', { name: 'Show Test' }).click();
       if (await testChatHasHistory(page)) {
+        // No accessible name on this button (see Bugs.md #7). Replace with getByRole when fixed.
         await testChat(page).locator('button').filter({
           has: page.locator('svg.vg-footer-reload--icon'),
         }).click();
@@ -472,8 +488,122 @@ test.describe('Start Settings - Text', () => {
           instructionsError = error;
         }
       }
-      await restoreOpeningMode(page, originalMode);
+      await restoreOpeningMode(page);
       if (instructionsError && !page.isClosed()) throw instructionsError;
     }
   });
+
+  test('TC16 - Design with AI: Next shows the design step', async ({ page }) => {
+    await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+    await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+    const popup = openingPopup(page);
+    await popup.getByText('Design with AI', { exact: true }).click();
+    await popup.getByRole('button', { name: 'Next' }).click();
+
+    await expect(popup.getByText('AI opening · Text · 2/2')).toBeVisible();
+    await expect(popup.getByText('Stream speed', { exact: true })).toBeVisible();
+    await expect(popup.getByText('Describe your UI', { exact: true })).toBeVisible();
+    await expect(popup.getByText('Drag & drop, or')).toBeVisible();
+    await expect(popup.getByRole('button', { name: 'Generate' })).toBeVisible();
+    await expect(popup.getByRole('button', { name: 'Done' })).toBeDisabled();
+
+    await page.keyboard.press('Escape');
+  });
+
+  test('TC17 - Generate with empty description shows an error and uses no credits', async ({ page }) => {
+    await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+    await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+    const popup = openingPopup(page);
+    await popup.getByText('Design with AI', { exact: true }).click();
+    await popup.getByRole('button', { name: 'Next' }).click();
+
+    await popup.getByRole('button', { name: 'Generate' }).click();
+
+    await expect(
+      page.getByText('Describe the opening or attach a reference image/doc'),
+    ).toBeVisible();
+    await expect(page.getByText('Design studio · tweak & accept')).toBeHidden();
+    await expect(page.getByText(/credits used/)).toBeHidden();
+
+    await page.keyboard.press('Escape');
+  });
+
+  test('TC18 - Description is kept after Back and Next', async ({ page }) => {
+    const description = 'A welcome card with a Book QA demo button.';
+
+    await startSettings(page).getByRole('radio', { name: 'AI starts' }).check();
+    await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+    const popup = openingPopup(page);
+    await popup.getByText('Design with AI', { exact: true }).click();
+    await popup.getByRole('button', { name: 'Next' }).click();
+
+    await popup.getByPlaceholder(/Welcome card with logo/).fill(description);
+
+    await popup.getByRole('button', { name: 'Back' }).click();
+    await expect(popup.getByText('AI opening · Text · 1/2')).toBeVisible();
+    await popup.getByRole('button', { name: 'Next' }).click();
+
+    await expect(popup.getByPlaceholder(/Welcome card with logo/)).toHaveValue(description);
+
+    await page.keyboard.press('Escape');
+  });
+
+  test('TC19 - Design with AI full flow: generate, accept, save, show in chat', async ({ page }) => {
+    test.setTimeout(180_000);
+    const token = `QA-${Date.now()}`;
+
+    try {
+      // Start from the saved baseline (AI starts, AI from prompt).
+      await restoreOpeningMode(page);
+
+      await startSettings(page).getByRole('button', { name: 'Edit' }).click();
+      const popup = openingPopup(page);
+      await popup.getByText('Design with AI', { exact: true }).click();
+      await popup.getByRole('button', { name: 'Next' }).click();
+      await popup.getByPlaceholder(/Welcome card with logo/).fill(
+        `A welcome card with the title "${token}" and one button labeled "Book QA demo".`,
+      );
+      await popup.getByRole('button', { name: 'Generate' }).click();
+
+      await expect(page.getByText(/Opening updated · [\d.]+ credits used/)).toBeVisible({
+        timeout: 60_000,
+      });
+
+      const preview = designPreview(page);
+      await expect(page.getByText('Design studio · tweak & accept')).toBeVisible();
+      await expect(preview.getByText(token, { exact: true })).toBeVisible();
+      await expect(preview.getByRole('button', { name: 'Book QA demo' })).toBeVisible();
+
+      await page.getByRole('button', { name: 'Accept' }).click();
+      await expect(startSettings(page).getByText(/Designed UI · \d+ blocks/)).toBeVisible();
+
+      await saveAndPublish(page);
+
+      await page.reload();
+      await prepareAgentPage(page);
+      await expect(startSettings(page).getByText(/Designed UI · \d+ blocks/)).toBeVisible();
+
+      await page.getByRole('button', { name: 'Show Test' }).click();
+      if (await testChatHasHistory(page)) {
+        // No accessible name on this button (see Bugs.md #7). Replace with getByRole when fixed.
+        await testChat(page).locator('button').filter({
+          has: page.locator('svg.vg-footer-reload--icon'),
+        }).click();
+        const confirm = page.getByRole('button', { name: 'Refresh the Conversation' });
+        const appeared = await confirm
+          .waitFor({ state: 'visible', timeout: 3_000 })
+          .then(() => true)
+          .catch(() => false);
+        if (appeared) await confirm.click();
+      }
+
+      await expect(testChat(page).getByText(token, { exact: true })).toBeVisible({
+        timeout: 60_000,
+      });
+      await expect(testChat(page).getByRole('button', { name: 'Book QA demo' })).toBeVisible();
+    } finally {
+      await restoreOpeningMode(page);
+    }
+  });
 });
+

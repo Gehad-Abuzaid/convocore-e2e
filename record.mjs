@@ -4,7 +4,8 @@ const browser = await chromium.launch({ headless: false });
 const context = await browser.newContext({ storageState: 'auth.json' });
 const page = await context.newPage();
 
-await page.goto('https://convocore.ai/app/na/agents/yjcqF4irAPsWuhhOlWsW/nodes');
+// QA Recording Agent: for manual recordings only. Automation uses the QA Functional Agent.
+await page.goto('https://convocore.ai/app/na/agents/6PNqdDZlvxUazeAeCBwF/nodes');
 
 await page.pause();
 

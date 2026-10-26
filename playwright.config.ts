@@ -32,6 +32,10 @@ export default defineConfig({
 
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
+    // Fail a stuck step on its own instead of using up the whole test timeout,
+    // so there's time left to save the trace and screenshot on failure.
+    actionTimeout: 15_000,
+    navigationTimeout: 30_000,
   },
 
   /* Configure projects for major browsers */
